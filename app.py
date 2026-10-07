@@ -15,7 +15,7 @@ st.title("Personal Finance & Equity Dashboard")
 # IMPORTANT: Paste your copied API key here
 genai.configure(api_key="YOUR_GEMINI_API_KEY")
 
-# Local database file (replaces the need to write back to Excel)
+# Local database file
 DB_FILE = "transactions_db.csv"
 
 # -- CATEGORIZATION RULES --
@@ -67,13 +67,20 @@ def load_net_worth_data(file_path):
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         
         for idx, row in raw_df.iterrows():
-            val = str(row[0]).strip()
-            months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            cell_val = row[0]
+            month_str = None
             
-            # Detect if row is a Date header (e.g., '10-Jan')
-            if any(m in val for m in months) and (val[0].isdigit() or '-' in val):
-                month_str = [m for m in months if m in val][0]
-                
+            # 1. Safely handle Excel Datetime objects (e.g. 2026-01-10 00:00:00)
+            if pd.notna(cell_val) and isinstance(cell_val, (datetime.datetime, datetime.date, pd.Timestamp)):
+                month_str = cell_val.strftime('%b')
+            else:
+                # 2. Handle standard text strings (e.g. "10-Jan")
+                val = str(cell_val).strip()
+                months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                if any(m in val for m in months) and val and (val[0].isdigit() or '-' in val):
+                    month_str = [m for m in months if m in val][0]
+                    
+            if month_str:
                 # Find which column holds the "Value" header
                 value_col_idx = -1
                 for i, cell in enumerate(row):
@@ -85,13 +92,12 @@ def load_net_worth_data(file_path):
                     net_worth = 0
                     current_idx = idx + 1
                     
-                    # Scan the immediate rows beneath the month (N, R, NR)
+                    # Scan the immediate rows beneath the month
                     while current_idx < len(raw_df):
                         b_row = raw_df.iloc[current_idx]
                         first_col = str(b_row[0]).strip().upper()
                         
                         if first_col in ['N', 'R', 'NR']:
-                            # The green total is either in the Value column or shifted 1 to the right
                             for col_offset in [0, 1]:
                                 target_col = value_col_idx + col_offset
                                 if target_col < len(b_row):
@@ -104,7 +110,7 @@ def load_net_worth_data(file_path):
                                         pass
                             current_idx += 1
                         else:
-                            break # Stop scanning when we hit a blank row or next month
+                            break 
                             
                     if net_worth > 0:
                         nw_data.append({
@@ -215,14 +221,13 @@ if data_loaded:
                         for y in selected_years:
                             year_data = nw_df[nw_df['Year'] == y]
                             if not year_data.empty:
-                                # Grab the last recorded month of that specific year
                                 last_month_val = year_data.iloc[-1]['Net Worth']
                                 annual_data.append({'Year': y, 'End of Year Net Worth': last_month_val})
                                 
                         if annual_data:
                             annual_df = pd.DataFrame(annual_data)
                             fig_annual = px.bar(annual_df, x='Year', y='End of Year Net Worth', text_auto='.3s')
-                            fig_annual.update_layout(xaxis_type='category') # Forces x-axis to treat years as labels, not decimals
+                            fig_annual.update_layout(xaxis_type='category') 
                             st.plotly_chart(fig_annual, width="stretch")
                 else:
                     st.info("No historical years found in tracker.")
@@ -233,15 +238,11 @@ if data_loaded:
                 
                 if not current_year_data.empty:
                     fig_monthly = px.line(current_year_data, x='Month', y='Net Worth', markers=True)
-                    
-                    # Dynamically scale Y-axis so growth is highly visible
-                    min_val = current_year_data['Net Worth'].min() * 0.95
-                    max_val = current_year_data['Net Worth'].max() * 1.05
-                    fig_monthly.update_yaxes(range=[min_val, max_val])
-                    
                     st.plotly_chart(fig_monthly, width="stretch")
                 else:
                     st.info(f"No Net Worth data found yet for {current_year}.")
+        else:
+            st.info("No Net Worth data could be extracted from Tracker_2024.xlsx. Ensure the 'Value' column and 'N/R/NR' rows exist.")
 
     # -- VIEW 2: CASH FLOW ANALYSIS (ON-SITE COMPARSION) --
     elif view_selection == "Cash Flow Analysis":
