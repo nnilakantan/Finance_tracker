@@ -67,21 +67,24 @@ def load_net_worth_data(file_path):
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         
         for idx, row in raw_df.iterrows():
-            cell_val = row[0]
             month_str = None
             
-            # 1. Safely handle Excel Datetime objects (e.g. 2026-01-10 00:00:00)
-            if pd.notna(cell_val) and isinstance(cell_val, (datetime.datetime, datetime.date, pd.Timestamp)):
-                month_str = cell_val.strftime('%b')
-            else:
-                # 2. Handle standard text strings (e.g. "10-Jan")
-                val = str(cell_val).strip()
-                months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                if any(m in val for m in months) and val and (val[0].isdigit() or '-' in val):
-                    month_str = [m for m in months if m in val][0]
-                    
+            # 1. Search the first 3 columns for a Date/Month (handles blank margin columns)
+            for col_idx in range(min(3, len(row))):
+                cell_val = row[col_idx]
+                if pd.notna(cell_val):
+                    if isinstance(cell_val, (datetime.datetime, datetime.date, pd.Timestamp)):
+                        month_str = cell_val.strftime('%b')
+                        break
+                    else:
+                        val = str(cell_val).strip()
+                        months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                        if any(m in val for m in months) and val and (val[0].isdigit() or '-' in val):
+                            month_str = [m for m in months if m in val][0]
+                            break
+                            
             if month_str:
-                # Find which column holds the "Value" header
+                # 2. Find which column holds the "Value" header in this row
                 value_col_idx = -1
                 for i, cell in enumerate(row):
                     if str(cell).strip().lower() == 'value':
@@ -92,13 +95,19 @@ def load_net_worth_data(file_path):
                     net_worth = 0
                     current_idx = idx + 1
                     
-                    # Scan the immediate rows beneath the month
-                    while current_idx < len(raw_df):
+                    # 3. Scan the next 6 rows down to find N, R, and NR
+                    while current_idx < min(idx + 7, len(raw_df)):
                         b_row = raw_df.iloc[current_idx]
-                        first_col = str(b_row[0]).strip().upper()
                         
-                        if first_col in ['N', 'R', 'NR']:
-                            for col_offset in [0, 1]:
+                        is_data_row = False
+                        for c_idx in range(min(3, len(b_row))):
+                            if str(b_row[c_idx]).strip().upper() in ['N', 'R', 'NR']:
+                                is_data_row = True
+                                break
+                                
+                        if is_data_row:
+                            # 4. Check the Value column and up to 3 columns to its right
+                            for col_offset in [0, 1, 2, 3]:
                                 target_col = value_col_idx + col_offset
                                 if target_col < len(b_row):
                                     try:
@@ -108,10 +117,8 @@ def load_net_worth_data(file_path):
                                             net_worth = num # Grabs the largest aggregate total
                                     except:
                                         pass
-                            current_idx += 1
-                        else:
-                            break 
-                            
+                        current_idx += 1
+                                
                     if net_worth > 0:
                         nw_data.append({
                             'Year': str(sheet_name),
