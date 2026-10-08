@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = BASE_DIR / "transactions_db.csv"
 CATEGORY_CACHE_FILE = BASE_DIR / "category_cache.json"
 CUSTOM_CATEGORIES_FILE = BASE_DIR / "custom_categories.json"
-USER_RULES_FILE = BASE_DIR / "user_rules.json"  # Persistent learned rules
+USER_RULES_FILE = BASE_DIR / "user_rules.json"
 TRACKER_FILE = BASE_DIR / "Tracker_2024.xlsx"
 
 # -- AI SETUP --
@@ -99,6 +99,40 @@ def get_all_categories():
     if "Uncategorized" in all_cats:
         all_cats.remove("Uncategorized")
     return all_cats + ["Uncategorized"]
+
+
+# -- DATABASE DISK WRITER (AUTO-SYNC ENGINE) --
+def load_transactions_db():
+    if not DB_FILE.exists():
+        return pd.DataFrame(columns=["Date", "Description", "Amount", "Source", "Category"])
+    db_df = pd.read_csv(DB_FILE)
+    if "Category" not in db_df.columns:
+        db_df["Category"] = "Uncategorized"
+    if "Source" not in db_df.columns:
+        db_df["Source"] = "Unknown"
+    db_df["Date"] = pd.to_datetime(db_df["Date"], errors="coerce")
+    db_df["Amount"] = pd.to_numeric(db_df["Amount"], errors="coerce")
+    return db_df.dropna(subset=["Date", "Amount"])
+
+
+def write_transactions_db(df):
+    """Physically writes the DataFrame to transactions_db.csv on disk."""
+    combined_df = df.copy()
+    combined_df["Date"] = pd.to_datetime(combined_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    combined_df["Description"] = combined_df["Description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+    combined_df["Amount"] = pd.to_numeric(combined_df["Amount"], errors="coerce").round(2)
+    combined_df["Category"] = combined_df["Category"].fillna("Uncategorized")
+    combined_df["Source"] = combined_df["Source"].fillna("Unknown")
+    combined_df = combined_df.dropna(subset=["Date", "Amount"])
+    combined_df = combined_df.drop_duplicates(subset=["Date", "Description", "Amount", "Source"], keep="last")
+    combined_df.sort_values(["Date", "Source", "Description"]).to_csv(DB_FILE, index=False)
+    return combined_df
+
+
+def save_transactions(df):
+    existing_df = load_transactions_db()
+    combined_df = pd.concat([existing_df, df], ignore_index=True)
+    return write_transactions_db(combined_df)
 
 
 # -- HELPER FUNCTIONS --
@@ -363,14 +397,10 @@ def process_statement(file_object):
 # -- CATEGORIZATION ENGINE --
 def rule_based_category(description):
     desc_lower = str(description).lower()
-
-    # 1. First priority: Learned custom rules
     user_rules = load_user_rules()
     for rule_pattern, category in user_rules.items():
         if rule_pattern.lower() in desc_lower:
             return category
-
-    # 2. Second priority: Built-in dictionary rules
     for category, keywords in CATEGORY_RULES.items():
         if any(keyword in desc_lower for keyword in keywords):
             return category
@@ -433,38 +463,6 @@ def categorize_transactions(df, use_gemini=True):
     return categorized
 
 
-def load_transactions_db():
-    if not DB_FILE.exists():
-        return pd.DataFrame(columns=["Date", "Description", "Amount", "Source", "Category"])
-    db_df = pd.read_csv(DB_FILE)
-    if "Category" not in db_df.columns:
-        db_df["Category"] = "Uncategorized"
-    if "Source" not in db_df.columns:
-        db_df["Source"] = "Unknown"
-    db_df["Date"] = pd.to_datetime(db_df["Date"], errors="coerce")
-    db_df["Amount"] = pd.to_numeric(db_df["Amount"], errors="coerce")
-    return db_df.dropna(subset=["Date", "Amount"])
-
-
-def write_transactions_db(df):
-    combined_df = df.copy()
-    combined_df["Date"] = pd.to_datetime(combined_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    combined_df["Description"] = combined_df["Description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
-    combined_df["Amount"] = pd.to_numeric(combined_df["Amount"], errors="coerce").round(2)
-    combined_df["Category"] = combined_df["Category"].fillna("Uncategorized")
-    combined_df["Source"] = combined_df["Source"].fillna("Unknown")
-    combined_df = combined_df.dropna(subset=["Date", "Amount"])
-    combined_df = combined_df.drop_duplicates(subset=["Date", "Description", "Amount", "Source"], keep="last")
-    combined_df.sort_values(["Date", "Source", "Description"]).to_csv(DB_FILE, index=False)
-    return combined_df
-
-
-def save_transactions(df):
-    existing_df = load_transactions_db()
-    combined_df = pd.concat([existing_df, df], ignore_index=True)
-    return write_transactions_db(combined_df)
-
-
 def discover_statement_files():
     statement_files = []
     for path in BASE_DIR.iterdir():
@@ -498,6 +496,13 @@ except FileNotFoundError:
 if data_loaded:
     st.sidebar.header("Dashboard Controls")
     view_selection = st.sidebar.radio("Navigation", ["Net Worth Analysis", "Cash Flow Analysis", "Statement Importer"])
+
+    # Live Database File Status Monitor
+    db_df = load_transactions_db()
+    if DB_FILE.exists():
+        mtime_str = datetime.datetime.fromtimestamp(DB_FILE.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"💾 **Disk Database Sync**\n* File: `{DB_FILE.name}`\n* Total Rows: **{len(db_df):,}**\n* Last Written: `{mtime_str}`")
 
     # -- VIEW 1: NET WORTH --
     if view_selection == "Net Worth Analysis":
@@ -582,8 +587,6 @@ if data_loaded:
                 else:
                     st.caption("No custom learned rules yet. Categorize recurring expenses below to build rules automatically.")
 
-        db_df = load_transactions_db()
-
         if db_df.empty:
             st.warning("No transaction data found. Import statements first to generate spending charts.")
         else:
@@ -591,9 +594,9 @@ if data_loaded:
             uncategorized_count = int(uncategorized_mask.sum())
 
             if uncategorized_count:
-                st.info(f"{uncategorized_count} transactions are still Uncategorized.")
+                st.info(f"{uncategorized_count} transactions are currently Uncategorized.")
 
-                # SECTION A: RECURRING EXPENSE DETECTOR
+                # SECTION A: RECURRING EXPENSE DETECTOR (AUTO-SAVES TO CSV)
                 uncat_descriptions = (
                     db_df[uncategorized_mask]
                     .groupby("Description")
@@ -604,7 +607,7 @@ if data_loaded:
 
                 if not recurring_uncat.empty:
                     with st.expander("🔁 Recurring Uncategorized Expenses Detected (2+ occurrences)", expanded=True):
-                        st.write("Assign a category below to automatically categorize all past occurrences and create an auto-rule for future imports:")
+                        st.write("Assigning a category below updates all matching rows in `transactions_db.csv` immediately and saves an auto-rule:")
                         col_r1, col_r2, col_r3 = st.columns([2, 1, 1])
                         with col_r1:
                             selected_vendor = st.selectbox("Select recurring merchant:", recurring_uncat["Description"].tolist())
@@ -613,21 +616,19 @@ if data_loaded:
                         with col_r3:
                             st.write("")
                             st.write("")
-                            if st.button("Apply to All & Save Rule", type="primary"):
-                                # 1. Update user rules
+                            if st.button("Apply to All & Auto-Save", type="primary"):
                                 rules = load_user_rules()
                                 rules[selected_vendor] = vendor_cat
                                 save_user_rules(rules)
 
-                                # 2. Update local database
                                 db_df.loc[db_df["Description"] == selected_vendor, "Category"] = vendor_cat
                                 write_transactions_db(db_df)
-                                st.success(f"Categorized all instances of '{selected_vendor}' as '{vendor_cat}' and saved auto-rule!")
+                                st.toast(f"✅ Auto-saved {selected_vendor} to transactions_db.csv", icon="💾")
                                 st.rerun()
 
                         st.dataframe(recurring_uncat.style.format({"TotalSpend": "${:,.2f}"}), width="stretch")
 
-                # SECTION B: GEMINI BULK RUNNER
+                # SECTION B: GEMINI BULK RUNNER (AUTO-SAVES TO CSV)
                 if st.button("Ask Gemini to categorize remaining uncategorized transactions", disabled=not GEMINI_CONFIGURED):
                     with st.spinner("Categorizing with Gemini..."):
                         db_df.loc[uncategorized_mask, "Category"] = db_df.loc[uncategorized_mask].apply(
@@ -635,17 +636,24 @@ if data_loaded:
                             axis=1,
                         )
                     write_transactions_db(db_df)
+                    st.toast("✅ Auto-saved Gemini categories to transactions_db.csv", icon="💾")
                     st.rerun()
 
-                # SECTION C: MANUAL TABLE EDITOR WITH AUTO-RULE LEARNING
+                # SECTION C: INSTANT TABLE AUTO-SAVE
                 with st.expander("Manually categorize individual transactions", expanded=False):
+                    if "editor_version" not in st.session_state:
+                        st.session_state["editor_version"] = 0
+
                     manual_df = db_df[uncategorized_mask].copy().reset_index(names="RowId")
                     manual_df["Date"] = manual_df["Date"].dt.strftime("%Y-%m-%d")
                     manual_df = manual_df[["RowId", "Date", "Description", "Amount", "Source", "Category"]]
 
+                    auto_learn_toggle = st.checkbox("Automatically remember selections as rules for future statements", value=True)
+
+                    editor_key = f"manual_uncategorized_editor_{st.session_state['editor_version']}"
                     edited_manual_df = st.data_editor(
                         manual_df,
-                        key="manual_uncategorized_editor",
+                        key=editor_key,
                         hide_index=True,
                         width="stretch",
                         disabled=["RowId", "Date", "Description", "Amount", "Source"],
@@ -656,26 +664,25 @@ if data_loaded:
                         },
                     )
 
-                    auto_learn_toggle = st.checkbox("Automatically remember these assignments as rules for future statements", value=True)
-
-                    if st.button("Save Categories", type="primary"):
+                    # Intercept any category edit and immediately flush to transactions_db.csv on disk
+                    diff_mask = edited_manual_df["Category"] != manual_df["Category"]
+                    if diff_mask.any():
+                        changed_rows = edited_manual_df[diff_mask]
                         rules = load_user_rules()
-                        for _, row in edited_manual_df.iterrows():
-                            row_id = int(row["RowId"])
-                            new_cat = row["Category"]
-                            desc = row["Description"]
+                        for _, ch_row in changed_rows.iterrows():
+                            r_id = int(ch_row["RowId"])
+                            new_cat = ch_row["Category"]
+                            desc = ch_row["Description"]
                             if new_cat in get_all_categories() and new_cat != "Uncategorized":
-                                db_df.loc[row_id, "Category"] = new_cat
+                                db_df.loc[r_id, "Category"] = new_cat
                                 if auto_learn_toggle:
                                     rules[desc] = new_cat
-                                    # Also cascade update any identical descriptions in DB
                                     db_df.loc[db_df["Description"] == desc, "Category"] = new_cat
-
                         if auto_learn_toggle:
                             save_user_rules(rules)
-
                         write_transactions_db(db_df)
-                        st.success("Saved categories and updated auto-rules.")
+                        st.session_state["editor_version"] += 1
+                        st.toast("✅ Auto-saved changes directly to transactions_db.csv!", icon="💾")
                         st.rerun()
 
             # --- FILTERS: CATEGORIES & DATE RANGE ---
