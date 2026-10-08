@@ -67,10 +67,21 @@ def load_net_worth_data(file_path):
     for sheet_name in xls.sheet_names:
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         
+        # 1. Find the exact column index for "Net Worth" in this sheet
+        nw_col_idx = -1
+        for r_idx in range(min(15, len(raw_df))):
+            for c_idx in range(len(raw_df.columns)):
+                cell_val = str(raw_df.iloc[r_idx, c_idx]).strip().lower()
+                if cell_val == 'net worth':
+                    nw_col_idx = c_idx
+                    break
+            if nw_col_idx != -1:
+                break
+        
         for idx, row in raw_df.iterrows():
             month_str = None
             
-            # 1. Search the first 4 columns for a Date/Month
+            # 2. Detect the Month header
             for col_idx in range(min(4, len(row))):
                 val = row.iloc[col_idx]
                 if pd.notna(val):
@@ -84,48 +95,32 @@ def load_net_worth_data(file_path):
                             break
                             
             if month_str:
-                # 2. Find the "Value" header column in this block
-                value_col_idx = -1
-                for search_idx in range(max(0, idx-2), min(len(raw_df), idx+3)):
-                    for i, cell in enumerate(raw_df.iloc[search_idx]):
+                net_worth = 0
+                
+                # 3. Look explicitly in the "Net Worth" column to grab the value
+                if nw_col_idx != -1:
+                    for current_idx in range(idx + 1, min(idx + 7, len(raw_df))):
+                        cell_val = raw_df.iloc[current_idx, nw_col_idx]
+                        if pd.notna(cell_val):
+                            try:
+                                clean = str(cell_val).replace('$', '').replace(',', '').strip()
+                                num = float(clean)
+                                if num > net_worth:
+                                    net_worth = num
+                            except:
+                                pass
+                else:
+                    # Fallback just in case the header is deleted
+                    value_col_idx = -1
+                    for i, cell in enumerate(row):
                         if pd.notna(cell) and 'value' in str(cell).lower() and i > 4:
                             value_col_idx = i
                             break
-                    if value_col_idx != -1: break
-                    
-                # Fallback if "Value" header is missing
-                if value_col_idx == -1:
-                    value_col_idx = len(row) - 4
-                    
-                net_worth = 0
-                
-                # 3. Only scan the immediate next 4 rows (to avoid bleeding into the next month)
-                for current_idx in range(idx + 1, min(idx + 5, len(raw_df))):
-                    b_row = raw_df.iloc[current_idx]
-                    
-                    # Stop if we accidentally hit the next month's block
-                    hit_next_month = False
-                    for c_idx in range(min(4, len(b_row))):
-                        cell_val = b_row.iloc[c_idx]
-                        if pd.notna(cell_val):
-                            val_str = str(cell_val).strip()
-                            if any(m in val_str for m in months) and (val_str[0].isdigit() or '-' in val_str):
-                                hit_next_month = True
-                    if hit_next_month: break
-                    
-                    # Ensure this is an N, R, or NR row
-                    is_data_row = False
-                    for c_idx in range(min(4, len(b_row))):
-                        cell_val = b_row.iloc[c_idx]
-                        if pd.notna(cell_val):
-                            clean_val = str(cell_val).strip().upper()
-                            if clean_val in ['N', 'R', 'NR']:
-                                is_data_row = True
-                                break
-                                
-                    if is_data_row:
-                        # 4. Check the cells in and around the Value column (spanning right) to find the absolute max total
-                        for col_offset in range(-2, 6): 
+                    if value_col_idx == -1: value_col_idx = len(row) - 4
+                        
+                    for current_idx in range(idx + 1, min(idx + 6, len(raw_df))):
+                        b_row = raw_df.iloc[current_idx]
+                        for col_offset in range(-1, 5): 
                             target_col = value_col_idx + col_offset
                             if 0 <= target_col < len(b_row):
                                 cell_val = b_row.iloc[target_col]
@@ -134,7 +129,7 @@ def load_net_worth_data(file_path):
                                         clean = str(cell_val).replace('$', '').replace(',', '').strip()
                                         num = float(clean)
                                         if num > net_worth:
-                                            net_worth = num # Grabs the largest aggregate total
+                                            net_worth = num
                                     except:
                                         pass
                                         
@@ -146,20 +141,6 @@ def load_net_worth_data(file_path):
                     })
                         
     return pd.DataFrame(nw_data)
-
-try:
-    nw_df = load_net_worth_data("Tracker_2024.xlsx")
-    data_loaded = True
-except FileNotFoundError:
-    st.error("Could not find 'Tracker_2024.xlsx'. Please ensure it is in the same folder as app.py.")
-    data_loaded = False
-
-try:
-    nw_df = load_net_worth_data("Tracker_2024.xlsx")
-    data_loaded = True
-except FileNotFoundError:
-    st.error("Could not find 'Tracker_2024.xlsx'. Please ensure it is in the same folder as app.py.")
-    data_loaded = False
 
 try:
     nw_df = load_net_worth_data("Tracker_2024.xlsx")
@@ -250,7 +231,7 @@ if data_loaded:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("### Historical Annual Comparison")
+                st.markdown("### Historical Annual Comparison (December)")
                 historical_years = [y for y in available_years if y != current_year]
                 
                 if historical_years:
@@ -260,13 +241,21 @@ if data_loaded:
                         annual_data = []
                         for y in selected_years:
                             year_data = nw_df[nw_df['Year'] == y]
-                            if not year_data.empty:
-                                last_month_val = year_data.iloc[-1]['Net Worth']
-                                annual_data.append({'Year': y, 'End of Year Net Worth': last_month_val})
+                            
+                            # Explicitly grab only the December value for historical years
+                            dec_data = year_data[year_data['Month'] == 'Dec']
+                            
+                            if not dec_data.empty:
+                                val = dec_data.iloc[-1]['Net Worth']
+                                annual_data.append({'Year': y, 'End of Year (Dec) Net Worth': val})
+                            elif not year_data.empty:
+                                # Fallback if a historical year ended early (e.g., in November)
+                                val = year_data.iloc[-1]['Net Worth']
+                                annual_data.append({'Year': y, 'End of Year (Dec) Net Worth': val})
                                 
                         if annual_data:
                             annual_df = pd.DataFrame(annual_data)
-                            fig_annual = px.bar(annual_df, x='Year', y='End of Year Net Worth', text_auto='.3s')
+                            fig_annual = px.bar(annual_df, x='Year', y='End of Year (Dec) Net Worth', text_auto='.3s')
                             fig_annual.update_layout(xaxis_type='category') 
                             st.plotly_chart(fig_annual, width="stretch")
                 else:
@@ -277,14 +266,21 @@ if data_loaded:
                 current_year_data = nw_df[nw_df['Year'] == current_year]
                 
                 if not current_year_data.empty:
+                    # Plots every single month available for the current year
                     fig_monthly = px.line(current_year_data, x='Month', y='Net Worth', markers=True)
+                    
+                    # Dynamically scale Y-axis so growth is highly visible
+                    min_val = current_year_data['Net Worth'].min() * 0.95
+                    max_val = current_year_data['Net Worth'].max() * 1.05
+                    fig_monthly.update_yaxes(range=[min_val, max_val])
+                    
                     st.plotly_chart(fig_monthly, width="stretch")
                 else:
                     st.info(f"No Net Worth data found yet for {current_year}.")
         else:
             st.info("No Net Worth data could be extracted from Tracker_2024.xlsx. Ensure the 'Value' column and 'N/R/NR' rows exist.")
 
-    # -- VIEW 2: CASH FLOW ANALYSIS (ON-SITE COMPARSION) --
+    # -- VIEW 2: CASH FLOW ANALYSIS --
     elif view_selection == "Cash Flow Analysis":
         st.subheader("Month-Over-Month Expense Comparison")
         
