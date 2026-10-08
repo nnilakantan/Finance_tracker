@@ -8,6 +8,7 @@ import google.generativeai as genai
 import pandas as pd
 import pdfplumber
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="Financial Dashboard", layout="wide", page_icon="📈")
@@ -116,7 +117,6 @@ def load_transactions_db():
 
 
 def write_transactions_db(df):
-    """Physically writes the DataFrame to transactions_db.csv on disk."""
     combined_df = df.copy()
     combined_df["Date"] = pd.to_datetime(combined_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
     combined_df["Description"] = combined_df["Description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
@@ -169,7 +169,7 @@ def parse_date_value(value):
     return None
 
 
-# -- EXCEL EXTRACTION --
+# -- EXCEL NET WORTH EXTRACTION --
 def find_net_worth_column(raw_df):
     for r_idx in range(min(15, len(raw_df))):
         for c_idx in range(len(raw_df.columns)):
@@ -497,7 +497,6 @@ if data_loaded:
     st.sidebar.header("Dashboard Controls")
     view_selection = st.sidebar.radio("Navigation", ["Net Worth Analysis", "Cash Flow Analysis", "Statement Importer"])
 
-    # Live Database File Status Monitor
     db_df = load_transactions_db()
     if DB_FILE.exists():
         mtime_str = datetime.datetime.fromtimestamp(DB_FILE.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -551,7 +550,6 @@ if data_loaded:
     elif view_selection == "Cash Flow Analysis":
         st.subheader("Monthly Spending Analysis")
 
-        # Expander: Manage Categories & Rules
         with st.expander("⚙️ Manage Categories & Auto-Rules"):
             cat_tab1, cat_tab2 = st.tabs(["Add Categories", "Active Auto-Rules"])
             with cat_tab1:
@@ -596,7 +594,7 @@ if data_loaded:
             if uncategorized_count:
                 st.info(f"{uncategorized_count} transactions are currently Uncategorized.")
 
-                # SECTION A: RECURRING EXPENSE DETECTOR (AUTO-SAVES TO CSV)
+                # RECURRING EXPENSE DETECTOR
                 uncat_descriptions = (
                     db_df[uncategorized_mask]
                     .groupby("Description")
@@ -628,7 +626,7 @@ if data_loaded:
 
                         st.dataframe(recurring_uncat.style.format({"TotalSpend": "${:,.2f}"}), width="stretch")
 
-                # SECTION B: GEMINI BULK RUNNER (AUTO-SAVES TO CSV)
+                # GEMINI BULK RUNNER
                 if st.button("Ask Gemini to categorize remaining uncategorized transactions", disabled=not GEMINI_CONFIGURED):
                     with st.spinner("Categorizing with Gemini..."):
                         db_df.loc[uncategorized_mask, "Category"] = db_df.loc[uncategorized_mask].apply(
@@ -639,7 +637,7 @@ if data_loaded:
                     st.toast("✅ Auto-saved Gemini categories to transactions_db.csv", icon="💾")
                     st.rerun()
 
-                # SECTION C: INSTANT TABLE AUTO-SAVE
+                # REAL-TIME TABLE AUTO-SAVE
                 with st.expander("Manually categorize individual transactions", expanded=False):
                     if "editor_version" not in st.session_state:
                         st.session_state["editor_version"] = 0
@@ -664,7 +662,6 @@ if data_loaded:
                         },
                     )
 
-                    # Intercept any category edit and immediately flush to transactions_db.csv on disk
                     diff_mask = edited_manual_df["Category"] != manual_df["Category"]
                     if diff_mask.any():
                         changed_rows = edited_manual_df[diff_mask]
@@ -729,48 +726,168 @@ if data_loaded:
                 if end_date:
                     expenses_df = expenses_df[expenses_df["Date"].dt.date <= end_date]
 
-            # --- VISUALIZATIONS ---
+            # --- SPENDING VISUALIZATIONS ---
             if expenses_df.empty:
                 st.info("No expense data found for the selected categories and date range.")
             else:
                 monthly_totals = expenses_df.groupby("MonthDate", as_index=False)["Amount"].sum()
                 monthly_totals["Month"] = monthly_totals["MonthDate"].dt.strftime("%b %Y")
+                ordered_months = monthly_totals["Month"].tolist()
 
                 st.markdown("### Spending Visualizations")
-                tab_bar, tab_tree, tab_line = st.tabs(["📊 Stacked Bar (Totals)", "🌲 Treemap (Proportions)", "📈 Line Chart (Trends)"])
+                tab_facets, tab_ranked, tab_tree, tab_trends = st.tabs([
+                    "🗂️ Faceted Category Grid",
+                    "📊 Ranked Monthly Outflows",
+                    "🌲 Treemap Breakdown",
+                    "📈 Line Trends",
+                ])
 
-                with tab_bar:
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        fig_bar = px.bar(expenses_df, x="Month", y="Amount", color="Category", title="Monthly Spending by Category")
-                        fig_bar.update_layout(barmode="stack", yaxis_tickprefix="$")
-                        fig_bar.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
-                        st.plotly_chart(fig_bar, width="stretch")
-                    with col2:
-                        fig_total = px.line(monthly_totals, x="Month", y="Amount", markers=True, title="Total Monthly Spending")
-                        fig_total.update_layout(yaxis_tickprefix="$")
-                        fig_total.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
-                        st.plotly_chart(fig_total, width="stretch")
+                # TAB 1: FACETED SMALL MULTIPLES GRID
+                with tab_facets:
+                    st.caption("Each category is charted independently on its own ground-level $0 baseline, preventing color collisions.")
+                    cat_monthly = (
+                        expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"]
+                        .sum()
+                        .sort_values("MonthDate")
+                    )
+                    active_cats = (
+                        expenses_df.groupby("Category")["Amount"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .index.tolist()
+                    )
 
+                    fig_facets = px.bar(
+                        cat_monthly,
+                        x="Month",
+                        y="Amount",
+                        facet_col="Category",
+                        facet_col_wrap=3,
+                        category_orders={"Month": ordered_months, "Category": active_cats},
+                        title=f"Category Monthly Trajectories ({time_preset})",
+                    )
+                    fig_facets.update_yaxes(matches=None, showticklabels=True, tickprefix="$")
+                    fig_facets.update_xaxes(title="", showticklabels=True)
+                    fig_facets.for_each_annotation(
+                        lambda a: a.update(text=f"<b>{a.text.split('=')[-1]}</b>", font=dict(size=13, color="#1f77b4"))
+                    )
+                    fig_facets.update_traces(marker_color="#2ca02c")
+                    
+                    rows_needed = (len(active_cats) + 2) // 3
+                    fig_facets.update_layout(
+                        height=max(450, rows_needed * 200),
+                        margin=dict(l=20, r=20, t=60, b=40),
+                    )
+                    st.plotly_chart(fig_facets, width="stretch")
+
+                # TAB 2: RANKED MONTHLY OUTFLOWS WITH MOM VARIANCE
+                with tab_ranked:
+                    col_sel, _ = st.columns([2, 2])
+                    with col_sel:
+                        selected_focus_month = st.selectbox(
+                            "Select Month to Inspect", ordered_months, index=len(ordered_months) - 1
+                        )
+                    cur_idx = ordered_months.index(selected_focus_month)
+
+                    current_m_df = expenses_df[expenses_df["Month"] == selected_focus_month].groupby("Category")["Amount"].sum()
+                    prev_m_df = (
+                        expenses_df[expenses_df["Month"] == ordered_months[cur_idx - 1]].groupby("Category")["Amount"].sum()
+                        if cur_idx > 0
+                        else pd.Series(dtype=float)
+                    )
+
+                    comp_df = pd.DataFrame({"Current": current_m_df, "Previous": prev_m_df}).fillna(0).reset_index()
+                    comp_df["Delta"] = comp_df["Current"] - comp_df["Previous"]
+                    comp_df = comp_df.sort_values(by="Current", ascending=True)
+
+                    fig_ranked = go.Figure()
+                    if cur_idx > 0:
+                        fig_ranked.add_trace(go.Bar(
+                            y=comp_df["Category"],
+                            x=comp_df["Previous"],
+                            orientation="h",
+                            name=f"Prior ({ordered_months[cur_idx - 1]})",
+                            marker=dict(color="rgba(180, 180, 180, 0.45)"),
+                            hoverinfo="x+name",
+                        ))
+
+                    bar_labels = [
+                        f"${c:,.0f} ({'+' if d > 0 else ''}${d:,.0f} MoM)" if cur_idx > 0 else f"${c:,.0f}"
+                        for c, d in zip(comp_df["Current"], comp_df["Delta"])
+                    ]
+
+                    fig_ranked.add_trace(go.Bar(
+                        y=comp_df["Category"],
+                        x=comp_df["Current"],
+                        orientation="h",
+                        name=selected_focus_month,
+                        marker=dict(color="#1f77b4"),
+                        text=bar_labels,
+                        textposition="outside",
+                    ))
+
+                    fig_ranked.update_layout(
+                        barmode="overlay",
+                        title=f"Ranked Outflows: {selected_focus_month} (vs. Prior Month Benchmark)",
+                        xaxis=dict(title="Spend ($)", tickprefix="$"),
+                        yaxis=dict(title=""),
+                        height=max(400, len(comp_df) * 32),
+                        margin=dict(l=10, r=120, t=40, b=20),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(fig_ranked, width="stretch")
+
+                # TAB 3: TREEMAP PROPORTIONS
                 with tab_tree:
                     cat_totals = expenses_df.groupby("Category", as_index=False)["Amount"].sum()
                     cat_totals = cat_totals[cat_totals["Amount"] > 0]
-                    fig_tree = px.treemap(cat_totals, path=["Category"], values="Amount", title=f"Spending Breakdown ({time_preset})")
-                    fig_tree.update_traces(textinfo="label+value+percent root", texttemplate="%{label}<br>$%{value:,.2f}<br>%{percentRoot:.1%}")
+                    fig_tree = px.treemap(
+                        cat_totals,
+                        path=["Category"],
+                        values="Amount",
+                        title=f"Spending Proportions ({time_preset})",
+                    )
+                    fig_tree.update_traces(
+                        textinfo="label+value+percent root",
+                        texttemplate="%{label}<br>$%{value:,.2f}<br>%{percentRoot:.1%}",
+                    )
                     st.plotly_chart(fig_tree, width="stretch")
 
-                with tab_line:
-                    trend_df = expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"].sum().sort_values("MonthDate")
-                    fig_line = px.line(trend_df, x="Month", y="Amount", color="Category", markers=True, title="Category Trends Over Time")
+                # TAB 4: LINE TRENDS
+                with tab_trends:
+                    trend_df = (
+                        expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"]
+                        .sum()
+                        .sort_values("MonthDate")
+                    )
+                    fig_line = px.line(
+                        trend_df,
+                        x="Month",
+                        y="Amount",
+                        color="Category",
+                        markers=True,
+                        title="Category Trends Over Time",
+                    )
                     fig_line.update_layout(yaxis_tickprefix="$")
-                    fig_line.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
+                    fig_line.update_xaxes(categoryorder="array", categoryarray=ordered_months)
                     st.plotly_chart(fig_line, width="stretch")
 
-                pivot_df = pd.pivot_table(expenses_df, values="Amount", index="Category", columns="Month", aggfunc="sum", fill_value=0)
-                sorted_cols = sorted(list(pivot_df.columns), key=lambda d: datetime.datetime.strptime(d, "%b %Y"))
+                # CROSS-CATEGORY HEATMAP & SUMMARY MATRIX
+                pivot_df = pd.pivot_table(
+                    expenses_df,
+                    values="Amount",
+                    index="Category",
+                    columns="Month",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                sorted_cols = [m for m in ordered_months if m in pivot_df.columns]
 
                 fig_heatmap = px.imshow(
-                    pivot_df[sorted_cols], aspect="auto", labels=dict(x="Month", y="Category", color="Spend"), title="Category Spend Heatmap"
+                    pivot_df[sorted_cols],
+                    aspect="auto",
+                    labels=dict(x="Month", y="Category", color="Spend"),
+                    title="Category Spend Intensity Heatmap",
                 )
                 fig_heatmap.update_layout(coloraxis_colorbar_tickprefix="$")
                 st.plotly_chart(fig_heatmap, width="stretch")
@@ -783,10 +900,16 @@ if data_loaded:
         st.subheader("Automated Statement Processing")
 
         folder_files = discover_statement_files()
-        selected_folder_files = st.multiselect("Statements found in this app folder", folder_files, default=folder_files, format_func=lambda p: p.name)
-        uploaded_files = st.file_uploader("Upload additional PDF, CSV, or Excel statements", type=["pdf", "csv", "xlsx"], accept_multiple_files=True)
+        selected_folder_files = st.multiselect(
+            "Statements found in this app folder", folder_files, default=folder_files, format_func=lambda p: p.name
+        )
+        uploaded_files = st.file_uploader(
+            "Upload additional PDF, CSV, or Excel statements", type=["pdf", "csv", "xlsx"], accept_multiple_files=True
+        )
 
-        use_gemini = st.checkbox("Use Gemini for descriptions not matched by local rules", value=GEMINI_CONFIGURED, disabled=not GEMINI_CONFIGURED)
+        use_gemini = st.checkbox(
+            "Use Gemini for descriptions not matched by local rules", value=GEMINI_CONFIGURED, disabled=not GEMINI_CONFIGURED
+        )
         if not GEMINI_CONFIGURED:
             st.caption("Add GEMINI_API_KEY to Streamlit secrets or your environment to enable Gemini categorization.")
 
