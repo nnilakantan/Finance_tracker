@@ -161,6 +161,13 @@ except FileNotFoundError:
     st.error("Could not find 'Tracker_2024.xlsx'. Please ensure it is in the same folder as app.py.")
     data_loaded = False
 
+try:
+    nw_df = load_net_worth_data("Tracker_2024.xlsx")
+    data_loaded = True
+except FileNotFoundError:
+    st.error("Could not find 'Tracker_2024.xlsx'. Please ensure it is in the same folder as app.py.")
+    data_loaded = False
+
 
 # -- SPECIFIC STATEMENT PARSERS --
 def parse_amex_csv(file_object):
