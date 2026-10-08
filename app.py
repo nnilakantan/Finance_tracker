@@ -513,7 +513,6 @@ if data_loaded:
                     manual_df["Date"] = manual_df["Date"].dt.strftime("%Y-%m-%d")
                     manual_df = manual_df[["RowId", "Date", "Description", "Amount", "Source", "Category"]]
 
-                    # The dropdown now uses the dynamic get_all_categories() list
                     edited_manual_df = st.data_editor(
                         manual_df,
                         key="manual_uncategorized_editor",
@@ -537,39 +536,122 @@ if data_loaded:
                     with clear_col:
                         st.caption("Change the Category dropdowns, then save. The charts use the saved categories.")
 
-            # Calculate exclusions based on the dynamic list
-            dynamic_categories = get_all_categories()
-            default_exclusions = sorted([c for c in SPENDING_EXCLUSIONS if c in set(db_df["Category"])])
-            excluded_categories = st.multiselect(
-                "Exclude non-spending categories",
-                sorted(db_df["Category"].dropna().unique()),
-                default=default_exclusions,
-            )
+            # --- FILTERS: CATEGORIES & DATE RANGE ---
+            st.markdown("---")
+            filter_col1, filter_col2, filter_col3 = st.columns([2, 1, 1])
+
+            with filter_col1:
+                default_exclusions = sorted([c for c in SPENDING_EXCLUSIONS if c in set(db_df["Category"])])
+                excluded_categories = st.multiselect(
+                    "Exclude non-spending categories",
+                    sorted(db_df["Category"].dropna().unique()),
+                    default=default_exclusions,
+                )
 
             expenses_df = prepare_expenses(db_df, excluded_categories)
+
+            start_date = None
+            end_date = None
+
+            if not expenses_df.empty:
+                min_avail = expenses_df["Date"].min().date()
+                max_avail = expenses_df["Date"].max().date()
+                today = datetime.date.today()
+
+                with filter_col2:
+                    time_preset = st.selectbox(
+                        "Date Filter",
+                        ["All Time", "Last 30 Days", "Last 90 Days", "Year to Date (YTD)", "Custom Range"],
+                        index=0,
+                    )
+
+                if time_preset == "Last 30 Days":
+                    start_date = today - datetime.timedelta(days=30)
+                elif time_preset == "Last 90 Days":
+                    start_date = today - datetime.timedelta(days=90)
+                elif time_preset == "Year to Date (YTD)":
+                    start_date = datetime.date(today.year, 1, 1)
+                elif time_preset == "Custom Range":
+                    with filter_col3:
+                        selected_range = st.date_input(
+                            "Select date range",
+                            value=(min_avail, max_avail),
+                            min_value=min_avail,
+                            max_value=max_avail,
+                        )
+                        if isinstance(selected_range, (tuple, list)) and len(selected_range) == 2:
+                            start_date, end_date = selected_range
+
+                if start_date:
+                    expenses_df = expenses_df[expenses_df["Date"].dt.date >= start_date]
+                if end_date:
+                    expenses_df = expenses_df[expenses_df["Date"].dt.date <= end_date]
+
+            # --- VISUALIZATIONS ---
             if expenses_df.empty:
-                st.info("No expenses remain after applying exclusions.")
+                st.info("No expense data found for the selected categories and date range.")
             else:
                 monthly_totals = expenses_df.groupby("MonthDate", as_index=False)["Amount"].sum()
                 monthly_totals["Month"] = monthly_totals["MonthDate"].dt.strftime("%b %Y")
 
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    fig = px.bar(expenses_df, x="Month", y="Amount", color="Category", title="Monthly Spending by Category")
-                    fig.update_layout(barmode="stack", yaxis_tickprefix="$")
-                    fig.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
-                    st.plotly_chart(fig, width="stretch")
+                st.markdown("### Spending Visualizations")
+                tab_bar, tab_tree, tab_line = st.tabs(["📊 Stacked Bar (Totals)", "🌲 Treemap (Proportions)", "📈 Line Chart (Trends)"])
 
-                with col2:
-                    fig_total = px.line(monthly_totals, x="Month", y="Amount", markers=True, title="Total Monthly Spending")
-                    fig_total.update_layout(yaxis_tickprefix="$")
-                    fig_total.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
-                    st.plotly_chart(fig_total, width="stretch")
+                with tab_bar:
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        fig_bar = px.bar(expenses_df, x="Month", y="Amount", color="Category", title="Monthly Spending by Category")
+                        fig_bar.update_layout(barmode="stack", yaxis_tickprefix="$")
+                        fig_bar.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
+                        st.plotly_chart(fig_bar, width="stretch")
+                    with col2:
+                        fig_total = px.line(monthly_totals, x="Month", y="Amount", markers=True, title="Total Monthly Spending")
+                        fig_total.update_layout(yaxis_tickprefix="$")
+                        fig_total.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
+                        st.plotly_chart(fig_total, width="stretch")
 
-                pivot_df = pd.pivot_table(expenses_df, values="Amount", index="Category", columns="Month", aggfunc="sum", fill_value=0)
+                with tab_tree:
+                    cat_totals = expenses_df.groupby("Category", as_index=False)["Amount"].sum()
+                    cat_totals = cat_totals[cat_totals["Amount"] > 0]
+                    
+                    fig_tree = px.treemap(
+                        cat_totals,
+                        path=["Category"],
+                        values="Amount",
+                        title=f"Spending Breakdown ({time_preset})",
+                    )
+                    fig_tree.update_traces(
+                        textinfo="label+value+percent root",
+                        texttemplate="%{label}<br>$%{value:,.2f}<br>%{percentRoot:.1%}",
+                    )
+                    st.plotly_chart(fig_tree, width="stretch")
+
+                with tab_line:
+                    trend_df = (
+                        expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"]
+                        .sum()
+                        .sort_values("MonthDate")
+                    )
+                    fig_line = px.line(trend_df, x="Month", y="Amount", color="Category", markers=True, title="Category Trends Over Time")
+                    fig_line.update_layout(yaxis_tickprefix="$")
+                    fig_line.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
+                    st.plotly_chart(fig_line, width="stretch")
+
+                pivot_df = pd.pivot_table(
+                    expenses_df,
+                    values="Amount",
+                    index="Category",
+                    columns="Month",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
                 sorted_cols = sorted(list(pivot_df.columns), key=lambda d: datetime.datetime.strptime(d, "%b %Y"))
+
                 fig_heatmap = px.imshow(
-                    pivot_df[sorted_cols], aspect="auto", labels=dict(x="Month", y="Category", color="Spend"), title="Category Spend Heatmap"
+                    pivot_df[sorted_cols],
+                    aspect="auto",
+                    labels=dict(x="Month", y="Category", color="Spend"),
+                    title="Category Spend Heatmap",
                 )
                 fig_heatmap.update_layout(coloraxis_colorbar_tickprefix="$")
                 st.plotly_chart(fig_heatmap, width="stretch")
