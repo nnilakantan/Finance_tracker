@@ -68,6 +68,7 @@ CATEGORY_RULES = {
 
 SPENDING_EXCLUSIONS = {"Income", "Transfer", "Credit Card Payment", "Investments / Savings"}
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+CATEGORY_OPTIONS = sorted(list(CATEGORY_RULES.keys()) + ["Uncategorized"])
 
 
 def clean_money(value):
@@ -469,13 +470,33 @@ def load_transactions_db():
 def save_transactions(df):
     existing_df = load_transactions_db()
     combined_df = pd.concat([existing_df, df], ignore_index=True)
+    return write_transactions_db(combined_df)
+
+
+def write_transactions_db(df):
+    combined_df = df.copy()
     combined_df["Date"] = pd.to_datetime(combined_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
     combined_df["Description"] = combined_df["Description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
     combined_df["Amount"] = pd.to_numeric(combined_df["Amount"], errors="coerce").round(2)
+    combined_df["Category"] = combined_df["Category"].fillna("Uncategorized")
+    combined_df["Source"] = combined_df["Source"].fillna("Unknown")
     combined_df = combined_df.dropna(subset=["Date", "Amount"])
     combined_df = combined_df.drop_duplicates(subset=["Date", "Description", "Amount", "Source"], keep="last")
     combined_df.sort_values(["Date", "Source", "Description"]).to_csv(DB_FILE, index=False)
     return combined_df
+
+
+def apply_manual_categories(db_df, edited_df):
+    if edited_df.empty:
+        return db_df
+
+    updated_df = db_df.copy()
+    for _, row in edited_df.iterrows():
+        row_id = int(row["RowId"])
+        category = row["Category"]
+        if category in CATEGORY_OPTIONS and row_id in updated_df.index:
+            updated_df.loc[row_id, "Category"] = category
+    return updated_df
 
 
 def discover_statement_files():
@@ -588,6 +609,39 @@ if data_loaded:
                         )
                     db_df.to_csv(DB_FILE, index=False)
                     st.rerun()
+
+                with st.expander("Manually categorize uncategorized transactions", expanded=True):
+                    manual_df = db_df[db_df["Category"] == "Uncategorized"].copy()
+                    manual_df = manual_df.reset_index(names="RowId")
+                    manual_df["Date"] = manual_df["Date"].dt.strftime("%Y-%m-%d")
+                    manual_df = manual_df[["RowId", "Date", "Description", "Amount", "Source", "Category"]]
+
+                    edited_manual_df = st.data_editor(
+                        manual_df,
+                        key="manual_uncategorized_editor",
+                        hide_index=True,
+                        width="stretch",
+                        disabled=["RowId", "Date", "Description", "Amount", "Source"],
+                        column_config={
+                            "RowId": None,
+                            "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                            "Category": st.column_config.SelectboxColumn(
+                                "Category",
+                                options=CATEGORY_OPTIONS,
+                                required=True,
+                            ),
+                        },
+                    )
+
+                    save_col, clear_col = st.columns([1, 4])
+                    with save_col:
+                        if st.button("Save categories", type="primary"):
+                            updated_db_df = apply_manual_categories(db_df, edited_manual_df)
+                            write_transactions_db(updated_db_df)
+                            st.success("Saved manual categories. Updating charts...")
+                            st.rerun()
+                    with clear_col:
+                        st.caption("Change the Category dropdowns, then save. The charts use the saved categories.")
 
             default_exclusions = sorted([c for c in SPENDING_EXCLUSIONS if c in set(db_df["Category"])])
             excluded_categories = st.multiselect(
