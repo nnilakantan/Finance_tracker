@@ -67,12 +67,12 @@ def load_net_worth_data(file_path):
     for sheet_name in xls.sheet_names:
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         
-        # 1. Find the exact column index for "Net Worth" in this sheet
+        # 1. Fuzzy search for the "Net Worth" column index
         nw_col_idx = -1
         for r_idx in range(min(15, len(raw_df))):
             for c_idx in range(len(raw_df.columns)):
                 cell_val = str(raw_df.iloc[r_idx, c_idx]).strip().lower()
-                if cell_val == 'net worth':
+                if 'net' in cell_val and 'worth' in cell_val:
                     nw_col_idx = c_idx
                     break
             if nw_col_idx != -1:
@@ -81,24 +81,36 @@ def load_net_worth_data(file_path):
         for idx, row in raw_df.iterrows():
             month_str = None
             
-            # 2. Detect the Month header
+            # 2. Bulletproof Date/Month detection
             for col_idx in range(min(4, len(row))):
                 val = row.iloc[col_idx]
                 if pd.notna(val):
+                    # Check if pandas natively loaded a Datetime object
                     if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
                         month_str = val.strftime('%b')
                         break
-                    elif isinstance(val, str):
-                        val_str = val.strip()
-                        if any(m in val_str for m in months) and (val_str[0].isdigit() or '-' in val_str):
-                            month_str = [m for m in months if m in val_str][0]
-                            break
+                    
+                    val_str = str(val).strip()
+                    
+                    # Check for explicit "10-Jan" text strings
+                    if any(m in val_str for m in months) and (val_str[0].isdigit() or '-' in val_str):
+                        month_str = [m for m in months if m in val_str][0]
+                        break
+                        
+                    # Fallback: if pandas loaded it as a raw stringified timestamp (e.g., "2022-12-02")
+                    try:
+                        parsed_date = pd.to_datetime(val_str)
+                        month_str = parsed_date.strftime('%b')
+                        break
+                    except:
+                        pass
                             
             if month_str:
                 net_worth = 0
                 
-                # 3. Look explicitly in the "Net Worth" column to grab the value
+                # 3. Look explicitly in the "Net Worth" column
                 if nw_col_idx != -1:
+                    # Scan the next 6 rows straight down to find the highest total (e.g., NR row)
                     for current_idx in range(idx + 1, min(idx + 7, len(raw_df))):
                         cell_val = raw_df.iloc[current_idx, nw_col_idx]
                         if pd.notna(cell_val):
@@ -110,7 +122,7 @@ def load_net_worth_data(file_path):
                             except:
                                 pass
                 else:
-                    # Fallback just in case the header is deleted
+                    # Absolute fallback if the Net Worth header is completely missing
                     value_col_idx = -1
                     for i, cell in enumerate(row):
                         if pd.notna(cell) and 'value' in str(cell).lower() and i > 4:
@@ -220,7 +232,7 @@ if data_loaded:
     st.sidebar.header("Dashboard Controls")
     view_selection = st.sidebar.radio("Navigation", ["Net Worth Analysis", "Cash Flow Analysis", "PDF Statement Importer"])
 
-    # -- VIEW 1: NET WORTH ANALYSIS --
+    # -- VIEW 1: NET Worth ANALYSIS --
     if view_selection == "Net Worth Analysis":
         st.subheader("Historical & Current Net Worth Analysis")
         
@@ -249,7 +261,6 @@ if data_loaded:
                                 val = dec_data.iloc[-1]['Net Worth']
                                 annual_data.append({'Year': y, 'End of Year (Dec) Net Worth': val})
                             elif not year_data.empty:
-                                # Fallback if a historical year ended early (e.g., in November)
                                 val = year_data.iloc[-1]['Net Worth']
                                 annual_data.append({'Year': y, 'End of Year (Dec) Net Worth': val})
                                 
@@ -266,10 +277,8 @@ if data_loaded:
                 current_year_data = nw_df[nw_df['Year'] == current_year]
                 
                 if not current_year_data.empty:
-                    # Plots every single month available for the current year
                     fig_monthly = px.line(current_year_data, x='Month', y='Net Worth', markers=True)
                     
-                    # Dynamically scale Y-axis so growth is highly visible
                     min_val = current_year_data['Net Worth'].min() * 0.95
                     max_val = current_year_data['Net Worth'].max() * 1.05
                     fig_monthly.update_yaxes(range=[min_val, max_val])
