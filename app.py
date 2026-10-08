@@ -170,16 +170,28 @@ def load_net_worth_data(file_path):
 
 
 def december_net_worth(nw_df, current_year):
-    annual_df = nw_df[(nw_df["Year"] < current_year) & (nw_df["MonthNumber"] == 12)].copy()
-    annual_df = annual_df[annual_df["Net Worth"] > 0]
-    return annual_df.sort_values("Year")
+    prior_df = nw_df[(nw_df["Year"] < current_year) & (nw_df["Net Worth"] > 0)].copy()
+    if prior_df.empty:
+        return prior_df
+
+    annual_rows = []
+    for year, year_df in prior_df.groupby("Year"):
+        december_df = year_df[year_df["MonthNumber"] == 12]
+        if not december_df.empty:
+            row = december_df.sort_values("Source Row").iloc[-1].copy()
+            row["Snapshot"] = "December"
+        else:
+            row = year_df.sort_values("MonthNumber").iloc[-1].copy()
+            row["Snapshot"] = f"Latest available ({row['Month']})"
+        annual_rows.append(row)
+
+    return pd.DataFrame(annual_rows).sort_values("Year")
 
 
 def current_year_net_worth(nw_df, current_year):
     current_month = datetime.date.today().month
     month_df = nw_df[
         (nw_df["Year"] == current_year)
-        & (nw_df["DateYear"] == current_year)
         & (nw_df["MonthNumber"] <= current_month)
     ].copy()
     month_df = month_df.sort_values("MonthNumber")
@@ -514,23 +526,24 @@ if data_loaded:
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("### December Net Worth by Prior Year")
+                st.markdown("### Prior-Year Net Worth")
                 if not annual_df.empty:
                     fig_annual = px.bar(
                         annual_df,
                         x="Year",
                         y="Net Worth",
+                        color="Snapshot",
                         text_auto=".3s",
-                        title="End-of-Year Net Worth",
+                        title="December Net Worth, or Latest Available Month if December Is Blank",
                     )
                     fig_annual.update_layout(xaxis_type="category", yaxis_tickprefix="$")
                     st.plotly_chart(fig_annual, width="stretch")
                     st.dataframe(
-                        annual_df[["Year", "Month", "Net Worth"]].style.format({"Net Worth": "${:,.0f}"}),
+                        annual_df[["Year", "Snapshot", "Month", "Net Worth"]].style.format({"Net Worth": "${:,.0f}"}),
                         width="stretch",
                     )
                 else:
-                    st.info("No positive December net-worth entries were found for prior years.")
+                    st.info("No positive prior-year net-worth entries were found.")
 
             with col2:
                 st.markdown(f"### {current_year} Monthly Net Worth")
