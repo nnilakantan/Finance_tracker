@@ -13,7 +13,8 @@ st.set_page_config(page_title="Financial Dashboard", layout="wide", page_icon="ð
 st.title("Personal Finance & Equity Dashboard")
 
 # IMPORTANT: Paste your copied API key here
-genai.configure(api_key="YOUR_GEMINI_API_KEY")
+# Replace your current line with this:
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # Local database file
 DB_FILE = "transactions_db.csv"
