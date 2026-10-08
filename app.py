@@ -12,11 +12,10 @@ import google.generativeai as genai
 st.set_page_config(page_title="Financial Dashboard", layout="wide", page_icon="📈")
 st.title("Personal Finance & Equity Dashboard")
 
-# IMPORTANT: Paste your copied API key here
-# Replace your current line with this:
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+# Safely load the API key from Streamlit Secrets
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Local database file
 DB_FILE = "transactions_db.csv"
 
 # -- CATEGORIZATION RULES --
@@ -58,7 +57,7 @@ def smart_categorize(description):
         
     return "Uncategorized"
 
-# -- NET WORTH EXCEL PARSER --
+# -- NET WORTH EXCEL PARSER (STRICT COLUMN READER) --
 @st.cache_data
 def load_net_worth_data(file_path):
     xls = pd.ExcelFile(file_path)
@@ -68,7 +67,7 @@ def load_net_worth_data(file_path):
     for sheet_name in xls.sheet_names:
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         
-        # 1. Fuzzy search for the "Net Worth" column index
+        # 1. Fuzzy search for the exact "Net Worth" column index
         nw_col_idx = -1
         for r_idx in range(min(15, len(raw_df))):
             for c_idx in range(len(raw_df.columns)):
@@ -86,19 +85,15 @@ def load_net_worth_data(file_path):
             for col_idx in range(min(4, len(row))):
                 val = row.iloc[col_idx]
                 if pd.notna(val):
-                    # Check if pandas natively loaded a Datetime object
                     if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
                         month_str = val.strftime('%b')
                         break
                     
                     val_str = str(val).strip()
-                    
-                    # Check for explicit "10-Jan" text strings
                     if any(m in val_str for m in months) and (val_str[0].isdigit() or '-' in val_str):
                         month_str = [m for m in months if m in val_str][0]
                         break
                         
-                    # Fallback: if pandas loaded it as a raw stringified timestamp (e.g., "2022-12-02")
                     try:
                         parsed_date = pd.to_datetime(val_str)
                         month_str = parsed_date.strftime('%b')
@@ -109,9 +104,8 @@ def load_net_worth_data(file_path):
             if month_str:
                 net_worth = 0
                 
-                # 3. Look explicitly in the "Net Worth" column
+                # 3. ONLY look down the specific "Net Worth" column. No python math.
                 if nw_col_idx != -1:
-                    # Scan the next 6 rows straight down to find the highest total (e.g., NR row)
                     for current_idx in range(idx + 1, min(idx + 7, len(raw_df))):
                         cell_val = raw_df.iloc[current_idx, nw_col_idx]
                         if pd.notna(cell_val):
@@ -122,29 +116,6 @@ def load_net_worth_data(file_path):
                                     net_worth = num
                             except:
                                 pass
-                else:
-                    # Absolute fallback if the Net Worth header is completely missing
-                    value_col_idx = -1
-                    for i, cell in enumerate(row):
-                        if pd.notna(cell) and 'value' in str(cell).lower() and i > 4:
-                            value_col_idx = i
-                            break
-                    if value_col_idx == -1: value_col_idx = len(row) - 4
-                        
-                    for current_idx in range(idx + 1, min(idx + 6, len(raw_df))):
-                        b_row = raw_df.iloc[current_idx]
-                        for col_offset in range(-1, 5): 
-                            target_col = value_col_idx + col_offset
-                            if 0 <= target_col < len(b_row):
-                                cell_val = b_row.iloc[target_col]
-                                if pd.notna(cell_val):
-                                    try:
-                                        clean = str(cell_val).replace('$', '').replace(',', '').strip()
-                                        num = float(clean)
-                                        if num > net_worth:
-                                            net_worth = num
-                                    except:
-                                        pass
                                         
                 if net_worth > 0:
                     nw_data.append({
@@ -233,7 +204,7 @@ if data_loaded:
     st.sidebar.header("Dashboard Controls")
     view_selection = st.sidebar.radio("Navigation", ["Net Worth Analysis", "Cash Flow Analysis", "PDF Statement Importer"])
 
-    # -- VIEW 1: NET Worth ANALYSIS --
+    # -- VIEW 1: NET WORTH ANALYSIS --
     if view_selection == "Net Worth Analysis":
         st.subheader("Historical & Current Net Worth Analysis")
         
@@ -288,7 +259,7 @@ if data_loaded:
                 else:
                     st.info(f"No Net Worth data found yet for {current_year}.")
         else:
-            st.info("No Net Worth data could be extracted from Tracker_2024.xlsx. Ensure the 'Value' column and 'N/R/NR' rows exist.")
+            st.info("No Net Worth data could be extracted from Tracker_2024.xlsx. Ensure you have opened the file in Excel and clicked Save.")
 
     # -- VIEW 2: CASH FLOW ANALYSIS --
     elif view_selection == "Cash Flow Analysis":
