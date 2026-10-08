@@ -17,7 +17,8 @@ st.title("Personal Finance & Equity Dashboard")
 BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = BASE_DIR / "transactions_db.csv"
 CATEGORY_CACHE_FILE = BASE_DIR / "category_cache.json"
-CUSTOM_CATEGORIES_FILE = BASE_DIR / "custom_categories.json" # NEW: Stores custom UI categories
+CUSTOM_CATEGORIES_FILE = BASE_DIR / "custom_categories.json"
+USER_RULES_FILE = BASE_DIR / "user_rules.json"  # Persistent learned rules
 TRACKER_FILE = BASE_DIR / "Tracker_2024.xlsx"
 
 # -- AI SETUP --
@@ -72,9 +73,21 @@ SPENDING_EXCLUSIONS = {"Income", "Transfer", "Credit Card Payment", "Investments
 MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-# -- DYNAMIC CATEGORY MANAGER --
+# -- PERSISTENT USER RULES & CATEGORIES --
+def load_user_rules():
+    if USER_RULES_FILE.exists():
+        try:
+            return json.loads(USER_RULES_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_user_rules(rules_dict):
+    USER_RULES_FILE.write_text(json.dumps(rules_dict, indent=2, sort_keys=True))
+
+
 def get_all_categories():
-    """Combines base rules with user-added custom categories."""
     base_cats = list(CATEGORY_RULES.keys())
     custom_cats = []
     if CUSTOM_CATEGORIES_FILE.exists():
@@ -82,8 +95,6 @@ def get_all_categories():
             custom_cats = json.loads(CUSTOM_CATEGORIES_FILE.read_text())
         except Exception:
             pass
-    
-    # Merge, deduplicate, sort, and ensure Uncategorized is always last
     all_cats = sorted(list(set(base_cats + custom_cats)))
     if "Uncategorized" in all_cats:
         all_cats.remove("Uncategorized")
@@ -92,25 +103,35 @@ def get_all_categories():
 
 # -- HELPER FUNCTIONS --
 def clean_money(value):
-    if pd.isna(value): return None
+    if pd.isna(value):
+        return None
     text = str(value).strip().replace("$", "").replace(",", "")
-    if not text: return None
-    if text.startswith("(") and text.endswith(")"): text = "-" + text[1:-1]
-    try: return float(text)
-    except ValueError: return None
+    if not text:
+        return None
+    if text.startswith("(") and text.endswith(")"):
+        text = "-" + text[1:-1]
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
 
 def parse_date_value(value):
-    if pd.isna(value): return None
+    if pd.isna(value):
+        return None
     if isinstance(value, (datetime.datetime, datetime.date, pd.Timestamp)):
         return pd.to_datetime(value).date()
-    if isinstance(value, (int, float)): return None
+    if isinstance(value, (int, float)):
+        return None
     value_text = str(value).strip()
     if not re.search(r"\d{1,2}[/-]\d{1,2}|20\d{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec", value_text, re.I):
         return None
     try:
         parsed = pd.to_datetime(value_text, errors="coerce")
-        if pd.notna(parsed): return parsed.date()
-    except Exception: return None
+        if pd.notna(parsed):
+            return parsed.date()
+    except Exception:
+        return None
     return None
 
 
@@ -119,8 +140,10 @@ def find_net_worth_column(raw_df):
     for r_idx in range(min(15, len(raw_df))):
         for c_idx in range(len(raw_df.columns)):
             cell_val = str(raw_df.iloc[r_idx, c_idx]).strip().lower()
-            if "net" in cell_val and "worth" in cell_val: return c_idx
+            if "net" in cell_val and "worth" in cell_val:
+                return c_idx
     return None
+
 
 def load_net_worth_data(file_path):
     xls = pd.ExcelFile(file_path)
@@ -128,17 +151,21 @@ def load_net_worth_data(file_path):
     for sheet_name in xls.sheet_names:
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         nw_col_idx = find_net_worth_column(raw_df)
-        if nw_col_idx is None: continue
+        if nw_col_idx is None:
+            continue
         sheet_year_match = re.search(r"(20\d{2})", str(sheet_name))
-        if not sheet_year_match: continue
+        if not sheet_year_match:
+            continue
         sheet_year = int(sheet_year_match.group(1))
 
         for row_idx, row in raw_df.iterrows():
             month_date = None
             for col_idx in range(min(4, len(row))):
                 month_date = parse_date_value(row.iloc[col_idx])
-                if month_date: break
-            if not month_date: continue
+                if month_date:
+                    break
+            if not month_date:
+                continue
 
             net_worth = None
             for detail_idx in range(row_idx + 1, min(row_idx + 5, len(raw_df))):
@@ -151,9 +178,14 @@ def load_net_worth_data(file_path):
 
             if net_worth:
                 records.append({
-                    "Year": sheet_year, "Month": month_date.strftime("%b"), "MonthNumber": month_date.month,
-                    "DateYear": month_date.year, "Date": datetime.date(sheet_year, month_date.month, min(month_date.day, 28)),
-                    "Net Worth": net_worth, "Source Sheet": str(sheet_name), "Source Row": row_idx,
+                    "Year": sheet_year,
+                    "Month": month_date.strftime("%b"),
+                    "MonthNumber": month_date.month,
+                    "DateYear": month_date.year,
+                    "Date": datetime.date(sheet_year, month_date.month, min(month_date.day, 28)),
+                    "Net Worth": net_worth,
+                    "Source Sheet": str(sheet_name),
+                    "Source Row": row_idx,
                 })
 
     if not records:
@@ -163,9 +195,11 @@ def load_net_worth_data(file_path):
     nw_df = nw_df.drop_duplicates(["Year", "MonthNumber"], keep="last")
     return nw_df
 
+
 def december_net_worth(nw_df, current_year):
     prior_df = nw_df[(nw_df["Year"] < current_year) & (nw_df["Net Worth"] > 0)].copy()
-    if prior_df.empty: return prior_df
+    if prior_df.empty:
+        return prior_df
     annual_rows = []
     for year, year_df in prior_df.groupby("Year"):
         december_df = year_df[year_df["MonthNumber"] == 12]
@@ -178,28 +212,30 @@ def december_net_worth(nw_df, current_year):
         annual_rows.append(row)
     return pd.DataFrame(annual_rows).sort_values("Year")
 
+
 def current_year_net_worth(nw_df, current_year):
     current_month = datetime.date.today().month
     month_df = nw_df[(nw_df["Year"] == current_year) & (nw_df["MonthNumber"] <= current_month)].copy()
     month_df = month_df.sort_values("MonthNumber")
-    if month_df.empty: return month_df
+    if month_df.empty:
+        return month_df
     all_months = pd.DataFrame({"MonthNumber": list(range(1, current_month + 1)), "Month": MONTH_ORDER[:current_month]})
     return all_months.merge(month_df, on=["MonthNumber", "Month"], how="left")
 
-@st.cache_data(show_spinner=False)
-def load_tracker_cached(file_path, modified_time):
-    return load_net_worth_data(file_path)
 
-
-# -- PDF PARSING ROUTINES --
+# -- STATEMENT PARSERS --
 def get_file_name(file_object):
     return Path(getattr(file_object, "name", str(file_object))).name
 
+
 def infer_year_for_mmdd(month, statement_end_date):
-    if not statement_end_date: return datetime.date.today().year
+    if not statement_end_date:
+        return datetime.date.today().year
     year = statement_end_date.year
-    if month > statement_end_date.month: year -= 1
+    if month > statement_end_date.month:
+        year -= 1
     return year
+
 
 def extract_statement_end_date(text):
     patterns = [
@@ -211,11 +247,14 @@ def extract_statement_end_date(text):
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             parsed = pd.to_datetime(match.group(1), errors="coerce")
-            if pd.notna(parsed): return parsed.date()
+            if pd.notna(parsed):
+                return parsed.date()
     return None
 
+
 def normalize_transactions(df, source):
-    if df is None or df.empty: return pd.DataFrame(columns=["Date", "Description", "Amount", "Source"])
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Date", "Description", "Amount", "Source"])
     clean_df = df[["Date", "Description", "Amount"]].copy()
     clean_df["Date"] = pd.to_datetime(clean_df["Date"], errors="coerce")
     clean_df["Description"] = clean_df["Description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
@@ -224,6 +263,7 @@ def normalize_transactions(df, source):
     clean_df = clean_df.dropna(subset=["Date", "Amount"])
     clean_df = clean_df[clean_df["Description"] != ""]
     return clean_df
+
 
 def parse_amex_tabular(file_object):
     file_name = get_file_name(file_object)
@@ -235,19 +275,22 @@ def parse_amex_tabular(file_object):
             header_row_idx = idx
             break
     if header_row_idx is not None:
-        if hasattr(file_object, "seek"): file_object.seek(0)
+        if hasattr(file_object, "seek"):
+            file_object.seek(0)
         df = pd.read_excel(file_object, header=header_row_idx + 1) if file_name.lower().endswith(".xlsx") else pd.read_csv(file_object, header=header_row_idx + 1)
-    
+
     df.columns = [str(c).strip() for c in df.columns]
     date_col = next((c for c in df.columns if c.lower() == "date"), None)
     desc_col = next((c for c in df.columns if c.lower() == "description"), None)
     amount_col = next((c for c in df.columns if c.lower() == "amount"), None)
-    if not all([date_col, desc_col, amount_col]): return pd.DataFrame()
+    if not all([date_col, desc_col, amount_col]):
+        return pd.DataFrame()
 
     clean_df = df[[date_col, desc_col, amount_col]].copy()
     clean_df.columns = ["Date", "Description", "Amount"]
     clean_df["Amount"] = -clean_df["Amount"].apply(clean_money)
     return normalize_transactions(clean_df, file_name)
+
 
 def parse_citi_pdf(pdf_file):
     transactions = []
@@ -258,13 +301,15 @@ def parse_citi_pdf(pdf_file):
         for page in pdf.pages:
             for line in (page.extract_text() or "").split("\n"):
                 match = pattern.match(line)
-                if not match: continue
+                if not match:
+                    continue
                 month, day = [int(p) for p in match.group(2).split("/")]
                 year = infer_year_for_mmdd(month, statement_end_date)
                 amount_val = clean_money(match.group(4))
                 if amount_val is not None:
                     transactions.append({"Date": datetime.date(year, month, day), "Description": match.group(3).strip(), "Amount": -amount_val})
     return normalize_transactions(pd.DataFrame(transactions), get_file_name(pdf_file))
+
 
 def parse_bofa_checking(pdf_file):
     transactions = []
@@ -277,53 +322,64 @@ def parse_bofa_checking(pdf_file):
                 if "Deposits and other additions" in line or "Withdrawals and other subtractions" in line:
                     in_transactions = True
                     continue
-                if line.startswith("Total ") or line.startswith("Page ") or not in_transactions: continue
+                if line.startswith("Total ") or line.startswith("Page ") or not in_transactions:
+                    continue
                 match = line_pattern.match(line)
-                if not match: continue
+                if not match:
+                    continue
                 amount_val = clean_money(match.group(3))
                 if amount_val is not None:
                     transactions.append({"Date": pd.to_datetime(match.group(1), format="%m/%d/%y").date(), "Description": match.group(2).strip(), "Amount": amount_val})
     return normalize_transactions(pd.DataFrame(transactions), get_file_name(pdf_file))
 
+
 def identify_bank(pdf_file):
     with pdfplumber.open(pdf_file) as pdf:
         first_page_text = (pdf.pages[0].extract_text() or "").lower()
-        if "citi" in first_page_text or "citicard" in first_page_text: return "citi"
-        if "bank of america" in first_page_text or "deposits" in first_page_text: return "bofa"
-        if "chase" in first_page_text: return "chase"
+        if "citi" in first_page_text or "citicard" in first_page_text:
+            return "citi"
+        if "bank of america" in first_page_text or "deposits" in first_page_text:
+            return "bofa"
+        if "chase" in first_page_text:
+            return "chase"
     return "unknown"
+
 
 def process_statement(file_object):
     ext = get_file_name(file_object).split(".")[-1].lower()
-    if ext in {"csv", "xlsx"}: return parse_amex_tabular(file_object)
+    if ext in {"csv", "xlsx"}:
+        return parse_amex_tabular(file_object)
     if ext == "pdf":
         bank_id = identify_bank(file_object)
-        if hasattr(file_object, "seek"): file_object.seek(0)
-        if bank_id == "citi": return parse_citi_pdf(file_object)
-        if bank_id == "bofa": return parse_bofa_checking(file_object)
+        if hasattr(file_object, "seek"):
+            file_object.seek(0)
+        if bank_id == "citi":
+            return parse_citi_pdf(file_object)
+        if bank_id == "bofa":
+            return parse_bofa_checking(file_object)
     return pd.DataFrame()
 
 
 # -- CATEGORIZATION ENGINE --
-def load_category_cache():
-    if CATEGORY_CACHE_FILE.exists():
-        try: return json.loads(CATEGORY_CACHE_FILE.read_text())
-        except Exception: return {}
-    return {}
-
-def save_category_cache(cache):
-    CATEGORY_CACHE_FILE.write_text(json.dumps(cache, indent=2, sort_keys=True))
-
 def rule_based_category(description):
     desc_lower = str(description).lower()
+
+    # 1. First priority: Learned custom rules
+    user_rules = load_user_rules()
+    for rule_pattern, category in user_rules.items():
+        if rule_pattern.lower() in desc_lower:
+            return category
+
+    # 2. Second priority: Built-in dictionary rules
     for category, keywords in CATEGORY_RULES.items():
-        if any(keyword in desc_lower for keyword in keywords): return category
+        if any(keyword in desc_lower for keyword in keywords):
+            return category
     return "Uncategorized"
 
+
 def gemini_categorize(description, amount=None):
-    if not GEMINI_CONFIGURED: return "Uncategorized"
-    
-    # Pass the DYNAMIC list of categories (including custom ones) to Gemini
+    if not GEMINI_CONFIGURED:
+        return "Uncategorized"
     valid_categories = get_all_categories()
     prompt = f"""
 Categorize this personal finance transaction.
@@ -343,38 +399,52 @@ Use "Uncategorized" only when the merchant or purpose is genuinely unclear.
     except Exception:
         return "Uncategorized"
 
+
 def smart_categorize(description, amount=None, use_gemini=True):
     category = rule_based_category(description)
-    if category != "Uncategorized": return category
+    if category != "Uncategorized":
+        return category
 
     cache_key = str(description).strip().lower()
-    cache = load_category_cache()
-    if cache_key in cache: return cache[cache_key]
+    cache = {}
+    if CATEGORY_CACHE_FILE.exists():
+        try:
+            cache = json.loads(CATEGORY_CACHE_FILE.read_text())
+        except Exception:
+            pass
+
+    if cache_key in cache:
+        return cache[cache_key]
 
     category = gemini_categorize(description, amount) if use_gemini else "Uncategorized"
     cache[cache_key] = category
-    save_category_cache(cache)
+    CATEGORY_CACHE_FILE.write_text(json.dumps(cache, indent=2, sort_keys=True))
     return category
 
+
 def categorize_transactions(df, use_gemini=True):
-    if df.empty: return df
+    if df.empty:
+        return df
     categorized = df.copy()
-    categorized["Category"] = categorized.apply(lambda row: smart_categorize(row["Description"], row["Amount"], use_gemini=use_gemini), axis=1)
+    categorized["Category"] = categorized.apply(
+        lambda row: smart_categorize(row["Description"], row["Amount"], use_gemini=use_gemini),
+        axis=1,
+    )
     return categorized
 
+
 def load_transactions_db():
-    if not DB_FILE.exists(): return pd.DataFrame(columns=["Date", "Description", "Amount", "Source", "Category"])
+    if not DB_FILE.exists():
+        return pd.DataFrame(columns=["Date", "Description", "Amount", "Source", "Category"])
     db_df = pd.read_csv(DB_FILE)
-    if "Category" not in db_df.columns: db_df["Category"] = "Uncategorized"
-    if "Source" not in db_df.columns: db_df["Source"] = "Unknown"
+    if "Category" not in db_df.columns:
+        db_df["Category"] = "Uncategorized"
+    if "Source" not in db_df.columns:
+        db_df["Source"] = "Unknown"
     db_df["Date"] = pd.to_datetime(db_df["Date"], errors="coerce")
     db_df["Amount"] = pd.to_numeric(db_df["Amount"], errors="coerce")
     return db_df.dropna(subset=["Date", "Amount"])
 
-def save_transactions(df):
-    existing_df = load_transactions_db()
-    combined_df = pd.concat([existing_df, df], ignore_index=True)
-    return write_transactions_db(combined_df)
 
 def write_transactions_db(df):
     combined_df = df.copy()
@@ -388,28 +458,28 @@ def write_transactions_db(df):
     combined_df.sort_values(["Date", "Source", "Description"]).to_csv(DB_FILE, index=False)
     return combined_df
 
-def apply_manual_categories(db_df, edited_df):
-    if edited_df.empty: return db_df
-    updated_df = db_df.copy()
-    valid_cats = get_all_categories()
-    for _, row in edited_df.iterrows():
-        row_id = int(row["RowId"])
-        category = row["Category"]
-        if category in valid_cats and row_id in updated_df.index:
-            updated_df.loc[row_id, "Category"] = category
-    return updated_df
+
+def save_transactions(df):
+    existing_df = load_transactions_db()
+    combined_df = pd.concat([existing_df, df], ignore_index=True)
+    return write_transactions_db(combined_df)
+
 
 def discover_statement_files():
     statement_files = []
     for path in BASE_DIR.iterdir():
-        if path.suffix.lower() not in {".pdf", ".csv", ".xlsx"}: continue
-        if path.name in {TRACKER_FILE.name, DB_FILE.name}: continue
+        if path.suffix.lower() not in {".pdf", ".csv", ".xlsx"}:
+            continue
+        if path.name in {TRACKER_FILE.name, DB_FILE.name}:
+            continue
         statement_files.append(path)
     return sorted(statement_files, key=lambda p: p.name.lower())
 
+
 def prepare_expenses(db_df, excluded_categories):
     expenses_df = db_df[db_df["Amount"] < 0].copy()
-    if excluded_categories: expenses_df = expenses_df[~expenses_df["Category"].isin(excluded_categories)]
+    if excluded_categories:
+        expenses_df = expenses_df[~expenses_df["Category"].isin(excluded_categories)]
     expenses_df["Amount"] = expenses_df["Amount"].abs()
     expenses_df["MonthDate"] = expenses_df["Date"].dt.to_period("M").dt.to_timestamp()
     expenses_df["Month"] = expenses_df["MonthDate"].dt.strftime("%b %Y")
@@ -418,7 +488,7 @@ def prepare_expenses(db_df, excluded_categories):
 
 # -- START OF UI --
 try:
-    nw_df = load_tracker_cached(str(TRACKER_FILE), TRACKER_FILE.stat().st_mtime)
+    nw_df = load_net_worth_data(str(TRACKER_FILE))
     data_loaded = True
 except FileNotFoundError:
     st.error(f"Could not find '{TRACKER_FILE.name}'. Please ensure it is in the same folder as app.py.")
@@ -429,6 +499,7 @@ if data_loaded:
     st.sidebar.header("Dashboard Controls")
     view_selection = st.sidebar.radio("Navigation", ["Net Worth Analysis", "Cash Flow Analysis", "Statement Importer"])
 
+    # -- VIEW 1: NET WORTH --
     if view_selection == "Net Worth Analysis":
         st.subheader("Historical & Current Net Worth Analysis")
 
@@ -442,7 +513,14 @@ if data_loaded:
             with col1:
                 st.markdown("### Prior-Year Net Worth")
                 if not annual_df.empty:
-                    fig_annual = px.bar(annual_df, x="Year", y="Net Worth", color="Snapshot", text_auto=".3s", title="December Net Worth, or Latest Available Month if December Is Blank")
+                    fig_annual = px.bar(
+                        annual_df,
+                        x="Year",
+                        y="Net Worth",
+                        color="Snapshot",
+                        text_auto=".3s",
+                        title="December Net Worth, or Latest Available Month if December Is Blank",
+                    )
                     fig_annual.update_layout(xaxis_type="category", yaxis_tickprefix="$")
                     st.plotly_chart(fig_annual, width="stretch")
                     st.dataframe(annual_df[["Year", "Snapshot", "Month", "Net Worth"]].style.format({"Net Worth": "${:,.0f}"}), width="stretch")
@@ -464,14 +542,14 @@ if data_loaded:
         else:
             st.info(f"No Net Worth data could be extracted from {TRACKER_FILE.name}.")
 
+    # -- VIEW 2: CASH FLOW ANALYSIS --
     elif view_selection == "Cash Flow Analysis":
         st.subheader("Monthly Spending Analysis")
-        
-        # --- MANAGE CUSTOM CATEGORIES UI ---
-        with st.expander("⚙️ Manage Categories"):
-            st.write("Add custom categories to use in the manual dropdowns and Gemini AI prompts.")
-            col_add, col_empty = st.columns([2, 3])
-            with col_add:
+
+        # Expander: Manage Categories & Rules
+        with st.expander("⚙️ Manage Categories & Auto-Rules"):
+            cat_tab1, cat_tab2 = st.tabs(["Add Categories", "Active Auto-Rules"])
+            with cat_tab1:
                 new_cat = st.text_input("New Category Name (e.g., 'Pet Supplies')")
                 if st.button("Add Category"):
                     new_cat_clean = new_cat.strip()
@@ -480,36 +558,88 @@ if data_loaded:
                         if new_cat_clean not in existing:
                             custom_cats = []
                             if CUSTOM_CATEGORIES_FILE.exists():
-                                try: custom_cats = json.loads(CUSTOM_CATEGORIES_FILE.read_text())
-                                except: pass
+                                try:
+                                    custom_cats = json.loads(CUSTOM_CATEGORIES_FILE.read_text())
+                                except Exception:
+                                    pass
                             custom_cats.append(new_cat_clean)
                             CUSTOM_CATEGORIES_FILE.write_text(json.dumps(custom_cats))
                             st.success(f"Added '{new_cat_clean}' to categories!")
                             st.rerun()
                         else:
                             st.warning("That category already exists.")
-                            
-        # Load local database
+            with cat_tab2:
+                current_rules = load_user_rules()
+                if current_rules:
+                    st.dataframe(
+                        pd.DataFrame(list(current_rules.items()), columns=["Keyword / Pattern", "Assigned Category"]),
+                        width="stretch",
+                    )
+                    if st.button("Clear All Custom Rules"):
+                        save_user_rules({})
+                        st.success("Cleared custom rules.")
+                        st.rerun()
+                else:
+                    st.caption("No custom learned rules yet. Categorize recurring expenses below to build rules automatically.")
+
         db_df = load_transactions_db()
 
         if db_df.empty:
             st.warning("No transaction data found. Import statements first to generate spending charts.")
         else:
-            uncategorized_count = int((db_df["Category"] == "Uncategorized").sum())
+            uncategorized_mask = db_df["Category"] == "Uncategorized"
+            uncategorized_count = int(uncategorized_mask.sum())
+
             if uncategorized_count:
                 st.info(f"{uncategorized_count} transactions are still Uncategorized.")
-                if st.button("Ask Gemini to categorize uncategorized transactions", disabled=not GEMINI_CONFIGURED):
-                    needs_ai = db_df["Category"] == "Uncategorized"
-                    with st.spinner("Categorizing remaining transactions with Gemini..."):
-                        db_df.loc[needs_ai, "Category"] = db_df.loc[needs_ai].apply(
-                            lambda row: smart_categorize(row["Description"], row["Amount"], use_gemini=True), axis=1
+
+                # SECTION A: RECURRING EXPENSE DETECTOR
+                uncat_descriptions = (
+                    db_df[uncategorized_mask]
+                    .groupby("Description")
+                    .agg(Count=("Amount", "count"), TotalSpend=("Amount", lambda x: x.abs().sum()))
+                    .reset_index()
+                )
+                recurring_uncat = uncat_descriptions[uncat_descriptions["Count"] >= 2].sort_values("Count", ascending=False)
+
+                if not recurring_uncat.empty:
+                    with st.expander("🔁 Recurring Uncategorized Expenses Detected (2+ occurrences)", expanded=True):
+                        st.write("Assign a category below to automatically categorize all past occurrences and create an auto-rule for future imports:")
+                        col_r1, col_r2, col_r3 = st.columns([2, 1, 1])
+                        with col_r1:
+                            selected_vendor = st.selectbox("Select recurring merchant:", recurring_uncat["Description"].tolist())
+                        with col_r2:
+                            vendor_cat = st.selectbox("Assign Category:", [c for c in get_all_categories() if c != "Uncategorized"], key="rec_cat")
+                        with col_r3:
+                            st.write("")
+                            st.write("")
+                            if st.button("Apply to All & Save Rule", type="primary"):
+                                # 1. Update user rules
+                                rules = load_user_rules()
+                                rules[selected_vendor] = vendor_cat
+                                save_user_rules(rules)
+
+                                # 2. Update local database
+                                db_df.loc[db_df["Description"] == selected_vendor, "Category"] = vendor_cat
+                                write_transactions_db(db_df)
+                                st.success(f"Categorized all instances of '{selected_vendor}' as '{vendor_cat}' and saved auto-rule!")
+                                st.rerun()
+
+                        st.dataframe(recurring_uncat.style.format({"TotalSpend": "${:,.2f}"}), width="stretch")
+
+                # SECTION B: GEMINI BULK RUNNER
+                if st.button("Ask Gemini to categorize remaining uncategorized transactions", disabled=not GEMINI_CONFIGURED):
+                    with st.spinner("Categorizing with Gemini..."):
+                        db_df.loc[uncategorized_mask, "Category"] = db_df.loc[uncategorized_mask].apply(
+                            lambda row: smart_categorize(row["Description"], row["Amount"], use_gemini=True),
+                            axis=1,
                         )
-                    db_df.to_csv(DB_FILE, index=False)
+                    write_transactions_db(db_df)
                     st.rerun()
 
-                with st.expander("Manually categorize uncategorized transactions", expanded=True):
-                    manual_df = db_df[db_df["Category"] == "Uncategorized"].copy()
-                    manual_df = manual_df.reset_index(names="RowId")
+                # SECTION C: MANUAL TABLE EDITOR WITH AUTO-RULE LEARNING
+                with st.expander("Manually categorize individual transactions", expanded=False):
+                    manual_df = db_df[uncategorized_mask].copy().reset_index(names="RowId")
                     manual_df["Date"] = manual_df["Date"].dt.strftime("%Y-%m-%d")
                     manual_df = manual_df[["RowId", "Date", "Description", "Amount", "Source", "Category"]]
 
@@ -526,15 +656,27 @@ if data_loaded:
                         },
                     )
 
-                    save_col, clear_col = st.columns([1, 4])
-                    with save_col:
-                        if st.button("Save categories", type="primary"):
-                            updated_db_df = apply_manual_categories(db_df, edited_manual_df)
-                            write_transactions_db(updated_db_df)
-                            st.success("Saved manual categories. Updating charts...")
-                            st.rerun()
-                    with clear_col:
-                        st.caption("Change the Category dropdowns, then save. The charts use the saved categories.")
+                    auto_learn_toggle = st.checkbox("Automatically remember these assignments as rules for future statements", value=True)
+
+                    if st.button("Save Categories", type="primary"):
+                        rules = load_user_rules()
+                        for _, row in edited_manual_df.iterrows():
+                            row_id = int(row["RowId"])
+                            new_cat = row["Category"]
+                            desc = row["Description"]
+                            if new_cat in get_all_categories() and new_cat != "Uncategorized":
+                                db_df.loc[row_id, "Category"] = new_cat
+                                if auto_learn_toggle:
+                                    rules[desc] = new_cat
+                                    # Also cascade update any identical descriptions in DB
+                                    db_df.loc[db_df["Description"] == desc, "Category"] = new_cat
+
+                        if auto_learn_toggle:
+                            save_user_rules(rules)
+
+                        write_transactions_db(db_df)
+                        st.success("Saved categories and updated auto-rules.")
+                        st.rerun()
 
             # --- FILTERS: CATEGORIES & DATE RANGE ---
             st.markdown("---")
@@ -549,9 +691,7 @@ if data_loaded:
                 )
 
             expenses_df = prepare_expenses(db_df, excluded_categories)
-
-            start_date = None
-            end_date = None
+            start_date, end_date = None, None
 
             if not expenses_df.empty:
                 min_avail = expenses_df["Date"].min().date()
@@ -573,12 +713,7 @@ if data_loaded:
                     start_date = datetime.date(today.year, 1, 1)
                 elif time_preset == "Custom Range":
                     with filter_col3:
-                        selected_range = st.date_input(
-                            "Select date range",
-                            value=(min_avail, max_avail),
-                            min_value=min_avail,
-                            max_value=max_avail,
-                        )
+                        selected_range = st.date_input("Select date range", value=(min_avail, max_avail), min_value=min_avail, max_value=max_avail)
                         if isinstance(selected_range, (tuple, list)) and len(selected_range) == 2:
                             start_date, end_date = selected_range
 
@@ -613,45 +748,22 @@ if data_loaded:
                 with tab_tree:
                     cat_totals = expenses_df.groupby("Category", as_index=False)["Amount"].sum()
                     cat_totals = cat_totals[cat_totals["Amount"] > 0]
-                    
-                    fig_tree = px.treemap(
-                        cat_totals,
-                        path=["Category"],
-                        values="Amount",
-                        title=f"Spending Breakdown ({time_preset})",
-                    )
-                    fig_tree.update_traces(
-                        textinfo="label+value+percent root",
-                        texttemplate="%{label}<br>$%{value:,.2f}<br>%{percentRoot:.1%}",
-                    )
+                    fig_tree = px.treemap(cat_totals, path=["Category"], values="Amount", title=f"Spending Breakdown ({time_preset})")
+                    fig_tree.update_traces(textinfo="label+value+percent root", texttemplate="%{label}<br>$%{value:,.2f}<br>%{percentRoot:.1%}")
                     st.plotly_chart(fig_tree, width="stretch")
 
                 with tab_line:
-                    trend_df = (
-                        expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"]
-                        .sum()
-                        .sort_values("MonthDate")
-                    )
+                    trend_df = expenses_df.groupby(["MonthDate", "Month", "Category"], as_index=False)["Amount"].sum().sort_values("MonthDate")
                     fig_line = px.line(trend_df, x="Month", y="Amount", color="Category", markers=True, title="Category Trends Over Time")
                     fig_line.update_layout(yaxis_tickprefix="$")
                     fig_line.update_xaxes(categoryorder="array", categoryarray=monthly_totals["Month"].tolist())
                     st.plotly_chart(fig_line, width="stretch")
 
-                pivot_df = pd.pivot_table(
-                    expenses_df,
-                    values="Amount",
-                    index="Category",
-                    columns="Month",
-                    aggfunc="sum",
-                    fill_value=0,
-                )
+                pivot_df = pd.pivot_table(expenses_df, values="Amount", index="Category", columns="Month", aggfunc="sum", fill_value=0)
                 sorted_cols = sorted(list(pivot_df.columns), key=lambda d: datetime.datetime.strptime(d, "%b %Y"))
 
                 fig_heatmap = px.imshow(
-                    pivot_df[sorted_cols],
-                    aspect="auto",
-                    labels=dict(x="Month", y="Category", color="Spend"),
-                    title="Category Spend Heatmap",
+                    pivot_df[sorted_cols], aspect="auto", labels=dict(x="Month", y="Category", color="Spend"), title="Category Spend Heatmap"
                 )
                 fig_heatmap.update_layout(coloraxis_colorbar_tickprefix="$")
                 st.plotly_chart(fig_heatmap, width="stretch")
@@ -659,6 +771,7 @@ if data_loaded:
                 st.markdown("### Expense Matrix")
                 st.dataframe(pivot_df[sorted_cols].style.format("${:,.0f}"), width="stretch")
 
+    # -- VIEW 3: STATEMENT IMPORTER --
     elif view_selection == "Statement Importer":
         st.subheader("Automated Statement Processing")
 
